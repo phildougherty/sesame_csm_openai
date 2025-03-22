@@ -605,7 +605,7 @@ class VoiceCloner:
         
         return result["text"]
 
-    def generate_speech(
+    async def generate_speech(
         self,
         text: str,
         voice_id: str,
