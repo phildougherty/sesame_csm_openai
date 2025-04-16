@@ -8,6 +8,7 @@ import time
 import tempfile
 import logging
 import asyncio
+import binascii
 from enum import Enum
 from typing import Dict, List, Optional, Any, Union
 import torch
@@ -597,8 +598,16 @@ async def conversation_to_speech(
                 continue
                 
             # Audio should be base64-encoded
-            audio_data = base64.b64decode(ctx['audio'])
-            audio_file = io.BytesIO(audio_data)
+            audio_base64 = ctx['audio']
+            # Add padding if necessary
+            padding = 4 - (len(audio_base64) % 4) if len(audio_base64) % 4 != 0 else 0
+            audio_base64_padded = audio_base64 + ('=' * padding)
+            try:
+                audio_data = base64.b64decode(audio_base64_padded)
+                audio_file = io.BytesIO(audio_data)
+            except binascii.Error as e:
+                logger.warning(f"Failed to decode base64 audio: {e}, skipping this context item")
+                continue
             
             # Save to temporary file for torchaudio
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp:

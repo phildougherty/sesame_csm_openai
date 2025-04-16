@@ -10,10 +10,11 @@ services:
     volumes:
       - ./models:/app/models
       - ./cloned_voices:/app/cloned_voices
-      - ./voice_references:/app/voice_references  
-      - ./voice_profiles:/app/voice_profiles    
+      - ./voice_references:/app/voice_references
+      - ./voice_profiles:/app/voice_profiles
     environment:
-      - HF_TOKEN=${HF_TOKEN}  
+      - HF_TOKEN=${HF_TOKEN}
+      - ENABLE_QUANTIZATION=false
     deploy:
       resources:
         reservations:
