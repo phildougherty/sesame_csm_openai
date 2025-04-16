@@ -122,9 +122,10 @@ class Generator:
             
         if torch.cuda.is_available():
             # Set to use 100% of GPU memory
-            # Remove memory fraction limit to use all available GPU memory
-            # torch.cuda.set_per_process_memory_fraction(memory_fraction)
-            logger.info("Using 100% of available CUDA memory for maximum performance")
+            # Set memory fraction to 1.0 for maximum GPU utilization
+            memory_fraction = 1.0
+            torch.cuda.set_per_process_memory_fraction(memory_fraction)
+            logger.info(f"Set CUDA memory usage to {memory_fraction*100}% of available memory for maximum performance")
             
     def _tokenize_text_segment(self, text: str, speaker: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """Tokenize a text segment."""
