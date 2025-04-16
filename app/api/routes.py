@@ -180,8 +180,10 @@ async def generate_speech(
                     ["tempo", str(speed)]
                 ]
                 audio_cpu = audio.cpu()
+                # Ensure proper tensor dimensions
+                audio_cpu = audio_cpu.unsqueeze(0) if len(audio_cpu.shape) == 1 else audio_cpu
                 adjusted_audio, _ = torchaudio.sox_effects.apply_effects_tensor(
-                    audio_cpu.unsqueeze(0), 
+                    audio_cpu, 
                     sample_rate, 
                     effects
                 )
@@ -329,8 +331,10 @@ async def stream_speech(request: Request, speech_request: SpeechRequest):
                             ["tempo", str(speed)]
                         ]
                         audio_cpu = segment_audio.cpu()
+                        # Ensure proper tensor dimensions
+                        audio_cpu = audio_cpu.unsqueeze(0) if len(audio_cpu.shape) == 1 else audio_cpu
                         adjusted_audio, _ = torchaudio.sox_effects.apply_effects_tensor(
-                            audio_cpu.unsqueeze(0), 
+                            audio_cpu, 
                             sample_rate, 
                             effects
                         )
@@ -492,13 +496,18 @@ async def format_audio(audio, response_format, sample_rate, app_state):
                 if hasattr(torchaudio.backend, 'sox_io_backend'):  # New torchaudio structure
                     if response_format == 'mp3':
                         # For MP3, use higher quality
-                        sox_effects = torchaudio.sox_effects.SoxEffectsChain()
-                        sox_effects.set_input_file(wav_path)
-                        sox_effects.append_effect_to_chain(["rate", f"{sample_rate}"])
-                        # Higher bitrate for better quality
-                        sox_effects.append_effect_to_chain(["gain", "-n"])  # Normalize
-                        out, _ = sox_effects.sox_build_flow_effects()
-                        torchaudio.save(temp_path, out, sample_rate, format="mp3", compression=128)
+                        # Update: SoxEffectsChain is deprecated, use apply_effects_tensor directly
+                        effects = [
+                            ["rate", f"{sample_rate}"],
+                            ["gain", "-n"]  # Normalize
+                        ]
+                        audio_cpu = audio_cpu.unsqueeze(0) if len(audio_cpu.shape) == 1 else audio_cpu
+                        out, new_sample_rate = torchaudio.sox_effects.apply_effects_tensor(
+                            audio_cpu, 
+                            sample_rate, 
+                            effects
+                        )
+                        torchaudio.save(temp_path, out, new_sample_rate, format="mp3", compression=128)
                     elif response_format == 'opus':
                         # Use ffmpeg for opus through a system call
                         import subprocess
