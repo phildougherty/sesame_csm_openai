@@ -125,7 +125,7 @@ async def stream_speech(
 ):
     """
     Stream audio of text being spoken by a realistic voice.
-    This endpoint provides an OpenAI-compatible streaming interface for TTS.
+    This endpoint provides a streaming interface for TTS.
     """
     # Check if model is loaded
     if not hasattr(request.app.state, "generator") or request.app.state.generator is None:
@@ -187,12 +187,17 @@ async def stream_speech(
             from_cloned_voice = False
             
             if hasattr(request.app.state, "voice_cloning_enabled") and request.app.state.voice_cloning_enabled:
-                voice_info = request.app.state.get_voice_info(voice)
-                from_cloned_voice = voice_info and voice_info["type"] == "cloned"
-                if from_cloned_voice:
-                    # Use cloned voice context for first segment
-                    voice_cloner = request.app.state.voice_cloner
-                    context = voice_cloner.get_voice_context(voice_info["voice_id"])
+                if hasattr(request.app.state, "get_voice_info"):
+                    voice_info = request.app.state.get_voice_info(voice)
+                    from_cloned_voice = voice_info and voice_info.get("type") == "cloned"
+                    if from_cloned_voice:
+                        # Use cloned voice context for first segment
+                        voice_cloner = request.app.state.voice_cloner
+                        context = voice_cloner.get_voice_context(voice_info["voice_id"])
+                    else:
+                        # Use standard voice context
+                        from app.voice_enhancement import get_voice_segments
+                        context = get_voice_segments(voice, request.app.state.device)
                 else:
                     # Use standard voice context
                     from app.voice_enhancement import get_voice_segments
@@ -235,40 +240,40 @@ async def stream_speech(
                             temperature=temperature
                         )
                     
-                    # Process audio quality for this segment
+                    # Process audio quality for this segment if enhancement enabled
                     if hasattr(request.app.state, "voice_enhancement_enabled") and request.app.state.voice_enhancement_enabled:
-                        from app.voice_enhancement import process_generated_audio
-                        segment_audio = process_generated_audio(
-                            audio=segment_audio,
-                            voice_name=voice,
-                            sample_rate=sample_rate,
-                            text=segment_text
-                        )
+                        try:
+                            from app.voice_enhancement import process_generated_audio
+                            segment_audio = process_generated_audio(
+                                audio=segment_audio,
+                                voice_name=voice,
+                                sample_rate=sample_rate,
+                                text=segment_text
+                            )
+                        except Exception as enhance_error:
+                            logger.warning(f"Voice enhancement failed: {enhance_error}. Using unenhanced audio.")
                         
                     # Handle speed adjustment
                     if speed != 1.0 and speed > 0:
                         try:
                             # Adjust speed using torchaudio
-                            effects = [["tempo", str(speed)]]
+                            effects = [
+                                ["tempo", str(speed)]
+                            ]
                             audio_cpu = segment_audio.cpu()
-                            adjusted_audio, _= torchaudio.sox_effects.apply_effects_tensor(
-                                audio_cpu.unsqueeze(0),
-                                sample_rate,
+                            adjusted_audio, _ = torchaudio.sox_effects.apply_effects_tensor(
+                                audio_cpu.unsqueeze(0), 
+                                sample_rate, 
                                 effects
                             )
                             segment_audio = adjusted_audio.squeeze(0)
+                            logger.info(f"Adjusted speech speed to {speed}x")
                         except Exception as e:
                             logger.warning(f"Failed to adjust speech speed: {e}")
-                            
-                    # Convert this segment to bytes and stream immediately
-                    buf = io.BytesIO()
-                    audio_to_save = segment_audio.unsqueeze(0) if len(segment_audio.shape) == 1 else segment_audio
-                    torchaudio.save(buf, audio_to_save.cpu(), sample_rate, format=response_format)
-                    buf.seek(0)
-                    segment_bytes = buf.read()
                     
-                    # Stream this segment immediately
-                    yield segment_bytes
+                    # Stream the segment in chunks
+                    async for chunk in chunker.chunk_audio(segment_audio):
+                        yield chunk
                     
                     # Update context with this segment for next generation
                     context = [
@@ -278,29 +283,27 @@ async def stream_speech(
                             audio=segment_audio
                         )
                     ]
-                    
-                except Exception as e:
-                    logger.error(f"Error generating segment {i+1}: {e}")
-                    # Try to continue with next segment
-                    
+                
+                except Exception as segment_error:
+                    logger.error(f"Error generating segment {i+1}: {segment_error}")
+                    # Continue to next segment
+            
         # Return streaming response
         return StreamingResponse(
             generate_streaming_audio(),
             media_type=media_type,
             headers={
-                "Content-Disposition": f'attachment; filename="speech.{response_format}"',
                 "X-Accel-Buffering": "no",  # Prevent buffering in nginx
-                "Cache-Control": "no-cache, no-store, must-revalidate",  # Prevent caching
-                "Pragma": "no-cache",
-                "Expires": "0",
+                "Cache-Control": "no-cache, no-store, must-revalidate",
                 "Connection": "keep-alive",
                 "Transfer-Encoding": "chunked"
             }
         )
+    
     except Exception as e:
         logger.error(f"Error in stream_speech: {e}")
-        raise HTTPException(status_code=500, detail=f"Error generating speech: {str(e)}")
-    
+        raise HTTPException(status_code=500, detail=str(e))
+
 @router.post("/audio/speech/streaming", tags=["Audio"])
 async def openai_stream_speech(
     request: Request,
@@ -312,4 +315,28 @@ async def openai_stream_speech(
     """
     # Use the same logic as the stream_speech endpoint but with a different name
     # to maintain the OpenAI API naming convention
+    return await stream_speech(request, speech_request)
+
+# Additional route for OpenAI compatibility
+@router.post("/v1/audio/speech/stream", tags=["Audio"])
+async def v1_stream_speech(
+    request: Request,
+    speech_request: SpeechRequest,
+):
+    """
+    Stream audio of text being spoken (v1 prefix route).
+    This endpoint is the v1 version of the streaming API.
+    """
+    return await stream_speech(request, speech_request)
+
+# Additional route for OpenAI compatibility 
+@router.post("/v1/audio/speech/streaming", tags=["Audio"])
+async def v1_openai_stream_speech(
+    request: Request,
+    speech_request: SpeechRequest,
+):
+    """
+    Stream audio in OpenAI-compatible streaming format (v1 prefix route).
+    This endpoint is the v1 version of the OpenAI streaming API.
+    """
     return await stream_speech(request, speech_request)
