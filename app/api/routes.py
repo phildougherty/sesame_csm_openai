@@ -495,19 +495,29 @@ async def format_audio(audio, response_format, sample_rate, app_state):
                 # Use ffmpeg via torchaudio for conversion
                 if hasattr(torchaudio.backend, 'sox_io_backend'):  # New torchaudio structure
                     if response_format == 'mp3':
-                        # For MP3, use higher quality
-                        # Update: SoxEffectsChain is deprecated, use apply_effects_tensor directly
-                        effects = [
-                            ["rate", f"{sample_rate}"],
-                            ["gain", "-n"]  # Normalize
-                        ]
-                        audio_cpu = audio_cpu.unsqueeze(0) if len(audio_cpu.shape) == 1 else audio_cpu
-                        out, new_sample_rate = torchaudio.sox_effects.apply_effects_tensor(
-                            audio_cpu, 
-                            sample_rate, 
-                            effects
-                        )
-                        torchaudio.save(temp_path, out, new_sample_rate, format="mp3", compression=128)
+                        try:
+                            # For MP3, use higher quality
+                            # Update: SoxEffectsChain is deprecated, use apply_effects_tensor directly
+                            effects = [
+                                ["rate", f"{sample_rate}"],
+                                ["gain", "-n"]  # Normalize
+                            ]
+                            audio_cpu = audio_cpu.unsqueeze(0) if len(audio_cpu.shape) == 1 else audio_cpu
+                            out, new_sample_rate = torchaudio.sox_effects.apply_effects_tensor(
+                                audio_cpu, 
+                                sample_rate, 
+                                effects
+                            )
+                            torchaudio.save(temp_path, out, new_sample_rate, format="mp3", compression=128)
+                        except Exception as sox_error:
+                            # Fallback to direct ffmpeg if sox_effects has issues
+                            logger.warning(f"Error using torchaudio.sox_effects: {sox_error}. Falling back to ffmpeg.")
+                            import subprocess
+                            subprocess.run([
+                                "ffmpeg", "-i", wav_path, "-codec:a", "libmp3lame", 
+                                "-qscale:a", "2", temp_path,
+                                "-y", "-loglevel", "error"
+                            ], check=True)
                     elif response_format == 'opus':
                         # Use ffmpeg for opus through a system call
                         import subprocess
