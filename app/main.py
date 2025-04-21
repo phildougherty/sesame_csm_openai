@@ -505,8 +505,6 @@ app.mount("/static", StaticFiles(directory="/app/static"), name="static")
 
 # Include routers
 app.include_router(api_router, prefix="/api/v1")
-
-# Add OpenAI compatible route
 app.include_router(api_router, prefix="/v1")
 
 # Add voice cloning routes

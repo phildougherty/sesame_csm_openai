@@ -76,6 +76,93 @@ CSM_DEVICE_MAP=balanced docker compose up -d
 
 # Sequential distribution (backbone on first GPUs, decoder on remaining)
 CSM_DEVICE_MAP=sequential docker compose up -d
+```
+
+## Real-Time Streaming TTS
+
+CSM-1B TTS API supports real-time streaming speech synthesis, allowing audio to be delivered and played as it's being generated, rather than waiting for the entire generation to complete. This is particularly useful for longer text or responsive user interfaces.
+
+### Streaming API Endpoints
+
+The API provides two endpoints for real-time streaming:
+
+1. **OpenAI-Compatible Streaming**: `/v1/audio/speech/streaming`
+   - Follows the same format as the OpenAI streaming TTS API
+   - Drop-in replacement for OpenAI's streaming endpoint
+
+2. **Standard Streaming**: `/v1/audio/speech/stream`
+   - CSM-specific streaming implementation
+   - Offers the same functionality but with a different URL path
+
+### How Streaming Works
+
+1. **Chunked Generation**: Text is split into small segments
+2. **Incremental Processing**: Each segment is processed in sequence
+3. **Real-Time Delivery**: Audio is delivered as it's generated
+4. **Client-Side Playback**: Audio is played as it arrives
+
+### Streaming API Example
+
+```bash
+curl -X POST http://localhost:8000/v1/audio/speech/streaming \
+  -H "Content-Type: application/json" \
+  -d '{
+    "model": "csm-1b",
+    "input": "This is a streaming text-to-speech example that starts playing before the entire text is processed.",
+    "voice": "alloy",
+    "response_format": "mp3"
+  }' \
+  --output - | ffplay -autoexit -
+```
+
+For web applications, you can use the Web Audio API to play the streaming audio:
+
+```javascript
+async function streamSpeech(text, voice) {
+  const response = await fetch('/v1/audio/speech/streaming', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+    },
+    body: JSON.stringify({
+      model: 'csm-1b',
+      input: text,
+      voice: voice,
+      response_format: 'mp3'
+    })
+  });
+
+  if (!response.ok) {
+    throw new Error('Streaming request failed');
+  }
+
+  // For browsers that support it
+  const audio = new Audio();
+  audio.src = URL.createObjectURL(await response.blob());
+  audio.play();
+}
+```
+
+### Streaming Demo
+
+The API includes a streaming demo page at `http://your-server-ip:8000/streaming-demo` where you can test real-time streaming speech generation with various voices and settings.
+
+### Supported Streaming Formats
+
+The streaming API supports the following formats:
+
+- MP3 (audio/mpeg)
+- Opus (audio/opus)
+- AAC (audio/aac)
+- FLAC (audio/flac)
+- WAV (audio/wav, recommended for lowest latency)
+
+### Benefits of Streaming
+
+- **Lower Perceived Latency**: Audio begins playing immediately
+- **Better User Experience**: No waiting for long texts
+- **Memory Efficiency**: Processing text in chunks uses less memory
+- **Responsive UI**: Applications remain responsive during generation
 
 ## Voice Cloning Guide
 

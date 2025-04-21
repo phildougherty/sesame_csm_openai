@@ -109,9 +109,23 @@ class Generator:
         self.device = device
         # Optimize for CUDA throughput
         if torch.cuda.is_available():
+            # Enable cuDNN benchmark for optimized performance
             torch.backends.cudnn.benchmark = True
+            # Use deterministic algorithms only when necessary
+            torch.backends.cudnn.deterministic = False
+            # Optimize for maximum performance
+            torch.backends.cuda.matmul.allow_tf32 = True
+            torch.backends.cudnn.allow_tf32 = True
+            # Clear cache before starting
             torch.cuda.empty_cache()
-            logger.info("CUDA optimizations enabled")
+            logger.info("Enhanced CUDA optimizations enabled for maximum performance")
+            
+        if torch.cuda.is_available():
+            # Set to use 100% of GPU memory
+            # Set memory fraction to 1.0 for maximum GPU utilization
+            memory_fraction = 1.0
+            torch.cuda.set_per_process_memory_fraction(memory_fraction)
+            logger.info(f"Set CUDA memory usage to {memory_fraction*100}% of available memory for maximum performance")
             
     def _tokenize_text_segment(self, text: str, speaker: int) -> Tuple[torch.Tensor, torch.Tensor]:
         """Tokenize a text segment."""
@@ -198,7 +212,7 @@ class Generator:
         curr_pos = torch.arange(0, prompt_tokens.size(0)).unsqueeze(0).long().to(self.device)
         
         # Use larger batch size
-        batch_size = 64  # Generate more frames at once
+        batch_size = 128  # Increased from 64 to utilize more GPU capacity
         all_samples = []
         for start_idx in range(0, max_audio_frames, batch_size):
             end_idx = min(start_idx + batch_size, max_audio_frames)
@@ -293,8 +307,8 @@ class Generator:
             
             # Generate first segment
             first_segment_samples = []
-            for start_idx in range(0, max_audio_frames, 32):
-                end_idx = min(start_idx + 32, max_audio_frames)
+            for start_idx in range(0, max_audio_frames, 64):  # Increased from 32 to 64
+                end_idx = min(start_idx + 64, max_audio_frames)
                 batch_frames = end_idx - start_idx
                 samples_batch = []
                 

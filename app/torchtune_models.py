@@ -178,6 +178,8 @@ class Model(nn.Module):
         # Load backbone and decoder
         self.backbone, backbone_dim = _prepare_transformer(FLAVORS[args.backbone_flavor]())
         self.decoder, decoder_dim = _prepare_transformer(FLAVORS[args.decoder_flavor]())
+        self.backbone = torch.compile(self.backbone, mode='max-autotune', fullgraph=True, backend='inductor')
+        self.decoder = torch.compile(self.decoder, mode='max-autotune', fullgraph=True, backend='inductor')
         
         # Embeddings
         self.text_embeddings = nn.Embedding(args.text_vocab_size, backbone_dim)

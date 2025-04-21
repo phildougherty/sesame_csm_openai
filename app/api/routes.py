@@ -8,6 +8,7 @@ import time
 import tempfile
 import logging
 import asyncio
+import binascii
 from enum import Enum
 from typing import Dict, List, Optional, Any, Union
 import torch
@@ -179,8 +180,10 @@ async def generate_speech(
                     ["tempo", str(speed)]
                 ]
                 audio_cpu = audio.cpu()
+                # Ensure proper tensor dimensions
+                audio_cpu = audio_cpu.unsqueeze(0) if len(audio_cpu.shape) == 1 else audio_cpu
                 adjusted_audio, _ = torchaudio.sox_effects.apply_effects_tensor(
-                    audio_cpu.unsqueeze(0), 
+                    audio_cpu, 
                     sample_rate, 
                     effects
                 )
@@ -220,8 +223,17 @@ async def stream_speech(request: Request, speech_request: SpeechRequest):
     voice = speech_request.voice
     response_format = speech_request.response_format
     temperature = speech_request.temperature
+    speed = speech_request.speed
+    max_audio_length_ms = speech_request.max_audio_length_ms
     
     logger.info(f"Real-time streaming speech from text ({len(input_text)} chars) with voice '{voice}'")
+    
+    # Check if text is empty
+    if not input_text or len(input_text.strip()) == 0:
+        raise HTTPException(
+            status_code=400,
+            detail="Input text cannot be empty"
+        )
     
     # Get speaker ID for the voice
     speaker_id = get_speaker_id(request.app.state, voice)
@@ -230,91 +242,63 @@ async def stream_speech(request: Request, speech_request: SpeechRequest):
 
     # Split text into very small segments for incremental generation
     text_segments = split_into_segments(input_text, max_chars=50)  # Smaller segments for faster first response
-    logger.info(f"Split text into {len(text_segments)} segments")
+    logger.info(f"Split text into {len(text_segments)} segments for incremental streaming")
 
     # Create media type based on format
-    media_type = {
-        "mp3": "audio/mpeg",
-        "opus": "audio/opus",
-        "aac": "audio/aac",
-        "flac": "audio/flac",
-        "wav": "audio/wav",
-    }.get(response_format, "audio/mpeg")
+    media_type = MIME_TYPES.get(response_format, "audio/mpeg")
     
-    # For streaming, WAV works best
-    streaming_format = "wav"
-    
-    # Set up WAV header for streaming
+    # Create the chunker for streaming
     sample_rate = request.app.state.sample_rate
-    
+    chunker = AudioChunker(sample_rate, response_format)
+
     async def generate_streaming_audio():
-        # Get context for the voice
+        # Check for cloned voice
+        voice_info = None
+        from_cloned_voice = False
+        
         if hasattr(request.app.state, "voice_cloning_enabled") and request.app.state.voice_cloning_enabled:
-            voice_info = request.app.state.get_voice_info(voice)
-            if voice_info and voice_info["type"] == "cloned":
-                # Use cloned voice context
-                voice_cloner = request.app.state.voice_cloner
-                context = voice_cloner.get_voice_context(voice_info["voice_id"])
+            if hasattr(request.app.state, "get_voice_info"):
+                voice_info = request.app.state.get_voice_info(voice)
+                from_cloned_voice = voice_info and voice_info.get("type") == "cloned"
+                if from_cloned_voice:
+                    # Use cloned voice context for first segment
+                    voice_cloner = request.app.state.voice_cloner
+                    context = voice_cloner.get_voice_context(voice_info["voice_id"])
+                else:
+                    # Use standard voice context
+                    from app.voice_enhancement import get_voice_segments
+                    context = get_voice_segments(voice, request.app.state.device)
             else:
-                # Standard voice
+                # Use standard voice context
                 from app.voice_enhancement import get_voice_segments
                 context = get_voice_segments(voice, request.app.state.device)
         else:
-            # Standard voice
+            # Use standard voice context
             from app.voice_enhancement import get_voice_segments
             context = get_voice_segments(voice, request.app.state.device)
 
-        # Send WAV header immediately
-        if streaming_format == "wav":
-            # Create a WAV header for 16-bit mono audio
-            header = bytes()
-            # RIFF header
-            header += b'RIFF'
-            header += b'\x00\x00\x00\x00'  # Placeholder for file size
-            header += b'WAVE'
-            # Format chunk
-            header += b'fmt '
-            header += (16).to_bytes(4, 'little')  # Format chunk size
-            header += (1).to_bytes(2, 'little')   # PCM format
-            header += (1).to_bytes(2, 'little')   # Mono channel
-            header += (sample_rate).to_bytes(4, 'little')  # Sample rate
-            header += (sample_rate * 2).to_bytes(4, 'little')  # Byte rate
-            header += (2).to_bytes(2, 'little')   # Block align
-            header += (16).to_bytes(2, 'little')  # Bits per sample
-            # Data chunk
-            header += b'data'
-            header += b'\x00\x00\x00\x00'  # Placeholder for data size
-            yield header
+        # Send an empty chunk to initialize the connection
+        yield b''
 
-        # Process each segment and stream immediately
+        # Process each text segment incrementally and stream in real time
         for i, segment_text in enumerate(text_segments):
             try:
                 logger.info(f"Generating segment {i+1}/{len(text_segments)}")
                 
-                # For cloned voices, use the voice cloner
-                if hasattr(request.app.state, "voice_cloning_enabled") and request.app.state.voice_cloning_enabled:
-                    voice_info = request.app.state.get_voice_info(voice)
-                    if voice_info and voice_info["type"] == "cloned":
-                        # Use cloned voice
-                        voice_cloner = request.app.state.voice_cloner
-                        segment_audio = await asyncio.to_thread(
-                            voice_cloner.generate_speech,
-                            segment_text,
-                            voice_info["voice_id"],
-                            temperature=temperature,
-                            topk=30,
-                            max_audio_length_ms=2000  # Keep it very short for fast generation
-                        )
-                    else:
-                        # Use standard voice with generator
-                        segment_audio = await asyncio.to_thread(
-                            request.app.state.generator.generate,
-                            segment_text,
-                            speaker_id,
-                            context,
-                            max_audio_length_ms=2000,  # Short for quicker generation
-                            temperature=temperature
-                        )
+                # Generate audio for this segment - use async to avoid blocking
+                if from_cloned_voice:
+                    # Generate with cloned voice
+                    voice_cloner = request.app.state.voice_cloner
+                    
+                    # Convert to asynchronous with asyncio.to_thread
+                    segment_audio = await asyncio.to_thread(
+                        voice_cloner.generate_speech,
+                        segment_text,
+                        voice_info["voice_id"],
+                        temperature=temperature,
+                        topk=30,
+                        max_audio_length_ms=2000  # Keep segments short for streaming
+                    )
                 else:
                     # Use standard voice with generator
                     segment_audio = await asyncio.to_thread(
@@ -326,23 +310,42 @@ async def stream_speech(request: Request, speech_request: SpeechRequest):
                         temperature=temperature
                     )
                 
-                # Skip empty or problematic audio
-                if segment_audio is None or segment_audio.numel() == 0:
-                    logger.warning(f"Empty audio for segment {i+1}")
-                    continue
+                # Process audio quality for this segment if enhancement enabled
+                if hasattr(request.app.state, "voice_enhancement_enabled") and request.app.state.voice_enhancement_enabled:
+                    try:
+                        from app.voice_enhancement import process_generated_audio
+                        segment_audio = process_generated_audio(
+                            audio=segment_audio,
+                            voice_name=voice,
+                            sample_rate=sample_rate,
+                            text=segment_text
+                        )
+                    except Exception as enhance_error:
+                        logger.warning(f"Voice enhancement failed: {enhance_error}. Using unenhanced audio.")
                     
-                # Convert to bytes and stream immediately
-                buf = io.BytesIO()
-                audio_to_save = segment_audio.unsqueeze(0) if len(segment_audio.shape) == 1 else segment_audio
-                torchaudio.save(buf, audio_to_save.cpu(), sample_rate, format=streaming_format)
-                buf.seek(0)
+                # Handle speed adjustment
+                if speed != 1.0 and speed > 0:
+                    try:
+                        # Adjust speed using torchaudio
+                        effects = [
+                            ["tempo", str(speed)]
+                        ]
+                        audio_cpu = segment_audio.cpu()
+                        # Ensure proper tensor dimensions
+                        audio_cpu = audio_cpu.unsqueeze(0) if len(audio_cpu.shape) == 1 else audio_cpu
+                        adjusted_audio, _ = torchaudio.sox_effects.apply_effects_tensor(
+                            audio_cpu, 
+                            sample_rate, 
+                            effects
+                        )
+                        segment_audio = adjusted_audio.squeeze(0)
+                        logger.info(f"Adjusted speech speed to {speed}x")
+                    except Exception as e:
+                        logger.warning(f"Failed to adjust speech speed: {e}")
                 
-                # For WAV format, skip the header for all segments after the first
-                if streaming_format == "wav" and i > 0:
-                    buf.seek(44)  # Skip WAV header
-                    
-                segment_bytes = buf.read()
-                yield segment_bytes
+                # Stream the segment in chunks
+                async for chunk in chunker.chunk_audio(segment_audio):
+                    yield chunk
                 
                 # Update context with this segment for next generation
                 context = [
@@ -352,12 +355,12 @@ async def stream_speech(request: Request, speech_request: SpeechRequest):
                         audio=segment_audio
                     )
                 ]
-                
-            except Exception as e:
-                logger.error(f"Error generating segment {i+1}: {e}")
+            
+            except Exception as segment_error:
+                logger.error(f"Error generating segment {i+1}: {segment_error}")
                 # Continue to next segment
         
-    # Return the streaming response
+    # Return streaming response
     return StreamingResponse(
         generate_streaming_audio(),
         media_type=media_type,
@@ -381,6 +384,30 @@ async def openai_stream_speech(
     """
     # Use the same logic as the stream_speech endpoint but with a different name
     # to maintain the OpenAI API naming convention
+    return await stream_speech(request, speech_request)
+
+# Additional route for OpenAI compatibility
+@router.post("/v1/audio/speech/stream", tags=["Audio"])
+async def v1_stream_speech(
+    request: Request,
+    speech_request: SpeechRequest,
+):
+    """
+    Stream audio of text being spoken (v1 prefix route).
+    This endpoint is the v1 version of the streaming API.
+    """
+    return await stream_speech(request, speech_request)
+
+# Additional route for OpenAI compatibility 
+@router.post("/v1/audio/speech/streaming", tags=["Audio"])
+async def v1_openai_stream_speech(
+    request: Request,
+    speech_request: SpeechRequest,
+):
+    """
+    Stream audio in OpenAI-compatible streaming format (v1 prefix route).
+    This endpoint is the v1 version of the OpenAI streaming API.
+    """
     return await stream_speech(request, speech_request)
 
 async def format_audio(audio, response_format, sample_rate, app_state):
@@ -468,14 +495,29 @@ async def format_audio(audio, response_format, sample_rate, app_state):
                 # Use ffmpeg via torchaudio for conversion
                 if hasattr(torchaudio.backend, 'sox_io_backend'):  # New torchaudio structure
                     if response_format == 'mp3':
-                        # For MP3, use higher quality
-                        sox_effects = torchaudio.sox_effects.SoxEffectsChain()
-                        sox_effects.set_input_file(wav_path)
-                        sox_effects.append_effect_to_chain(["rate", f"{sample_rate}"])
-                        # Higher bitrate for better quality
-                        sox_effects.append_effect_to_chain(["gain", "-n"])  # Normalize
-                        out, _ = sox_effects.sox_build_flow_effects()
-                        torchaudio.save(temp_path, out, sample_rate, format="mp3", compression=128)
+                        try:
+                            # For MP3, use higher quality
+                            # Update: SoxEffectsChain is deprecated, use apply_effects_tensor directly
+                            effects = [
+                                ["rate", f"{sample_rate}"],
+                                ["gain", "-n"]  # Normalize
+                            ]
+                            audio_cpu = audio_cpu.unsqueeze(0) if len(audio_cpu.shape) == 1 else audio_cpu
+                            out, new_sample_rate = torchaudio.sox_effects.apply_effects_tensor(
+                                audio_cpu, 
+                                sample_rate, 
+                                effects
+                            )
+                            torchaudio.save(temp_path, out, new_sample_rate, format="mp3", compression=128)
+                        except Exception as sox_error:
+                            # Fallback to direct ffmpeg if sox_effects has issues
+                            logger.warning(f"Error using torchaudio.sox_effects: {sox_error}. Falling back to ffmpeg.")
+                            import subprocess
+                            subprocess.run([
+                                "ffmpeg", "-i", wav_path, "-codec:a", "libmp3lame", 
+                                "-qscale:a", "2", temp_path,
+                                "-y", "-loglevel", "error"
+                            ], check=True)
                     elif response_format == 'opus':
                         # Use ffmpeg for opus through a system call
                         import subprocess
@@ -597,8 +639,16 @@ async def conversation_to_speech(
                 continue
                 
             # Audio should be base64-encoded
-            audio_data = base64.b64decode(ctx['audio'])
-            audio_file = io.BytesIO(audio_data)
+            audio_base64 = ctx['audio']
+            # Add padding if necessary
+            padding = 4 - (len(audio_base64) % 4) if len(audio_base64) % 4 != 0 else 0
+            audio_base64_padded = audio_base64 + ('=' * padding)
+            try:
+                audio_data = base64.b64decode(audio_base64_padded)
+                audio_file = io.BytesIO(audio_data)
+            except binascii.Error as e:
+                logger.warning(f"Failed to decode base64 audio: {e}, skipping this context item")
+                continue
             
             # Save to temporary file for torchaudio
             with tempfile.NamedTemporaryFile(suffix=".wav", delete=False) as temp:
