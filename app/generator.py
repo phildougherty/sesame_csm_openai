@@ -829,6 +829,13 @@ def load_csm_1b(ckpt_path: str = "ckpt.pt", device: str = "cuda", device_map: st
             # Ensure all CUDA work is completed to avoid launch delays
             torch.cuda.synchronize()
         
+        # Optimize model for inference (compile backbone and decoder)
+        if hasattr(model, 'optimize_for_inference'):
+            try:
+                logger.info("Compiling backbone and decoder for optimized inference performance")
+                model.optimize_for_inference()
+            except Exception as e:
+                logger.warning(f"Model optimization for inference failed: {e}")
         # Create generator
         logger.info("Creating generator with optimized settings")
         generator = Generator(model)

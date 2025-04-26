@@ -178,8 +178,6 @@ class Model(nn.Module):
         # Load backbone and decoder
         self.backbone, backbone_dim = _prepare_transformer(FLAVORS[args.backbone_flavor]())
         self.decoder, decoder_dim = _prepare_transformer(FLAVORS[args.decoder_flavor]())
-        self.backbone = torch.compile(self.backbone, mode='max-autotune', fullgraph=True, backend='inductor')
-        self.decoder = torch.compile(self.decoder, mode='max-autotune', fullgraph=True, backend='inductor')
         
         # Embeddings
         self.text_embeddings = nn.Embedding(args.text_vocab_size, backbone_dim)
@@ -262,6 +260,12 @@ class Model(nn.Module):
         
         return curr_sample
     
+    def optimize_for_inference(self):
+        """Compile backbone and decoder for optimized inference performance."""
+        import torch
+        self.backbone = torch.compile(self.backbone, mode='max-autotune', fullgraph=True, backend='inductor')
+        self.decoder = torch.compile(self.decoder, mode='max-autotune', fullgraph=True, backend='inductor')
+
     def reset_caches(self):
         """Reset KV caches."""
         self.backbone.reset_caches()
