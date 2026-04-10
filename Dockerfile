@@ -1,7 +1,7 @@
 # Multi-stage build for authenticated model downloads
 FROM python:3.10-slim AS model-downloader
 # Install huggingface-cli
-RUN pip install huggingface_hub
+RUN pip3 install huggingface_hub
 # Set working directory
 WORKDIR /model-downloader
 # Create directory for downloaded models
@@ -16,20 +16,20 @@ ARG TTS_ENGINE=csm
 
 # Login with token if provided
 RUN if [ -n "$HF_TOKEN" ]; then \
-    huggingface-cli login --token ${HF_TOKEN}; \
+    hf auth login --token ${HF_TOKEN}; \
     fi
 
 # Download CSM-1B model
 RUN if [ -n "$HF_TOKEN" ] || [ "$TTS_ENGINE" = "csm" ]; then \
     echo "Downloading CSM-1B model..."; \
-    huggingface-cli download sesame/csm-1b ckpt.pt --local-dir /model-downloader/models/csm-1b; \
+    hf download sesame/csm-1b ckpt.pt --local-dir /model-downloader/models/csm-1b; \
     else echo "Skipping CSM-1B model download"; fi
 
 # Download Dia-1.6B model
 RUN if [ -n "$HF_TOKEN" ] || [ "$TTS_ENGINE" = "dia" ]; then \
     echo "Downloading Dia-1.6B model..."; \
-    huggingface-cli download nari-labs/Dia-1.6B config.json --local-dir /model-downloader/models/dia-1.6b; \
-    huggingface-cli download nari-labs/Dia-1.6B dia-v0_1.pth --local-dir /model-downloader/models/dia-1.6b; \
+    hf download nari-labs/Dia-1.6B config.json --local-dir /model-downloader/models/dia-1.6b; \
+    hf download nari-labs/Dia-1.6B dia-v0_1.pth --local-dir /model-downloader/models/dia-1.6b; \
     else echo "Skipping Dia-1.6B model download"; fi
 
 # Now for the main application stage
